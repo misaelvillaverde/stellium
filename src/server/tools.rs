@@ -101,6 +101,13 @@ pub struct DeleteNatalChartInput {
     pub birth_date: String,
 }
 
+/// Input for searching natal charts
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct SearchNatalChartsInput {
+    #[schemars(description = "Search query - matches against name (case-insensitive, partial match)")]
+    pub query: String,
+}
+
 fn schema_to_value<T: schemars::JsonSchema>() -> Arc<serde_json::Map<String, Value>> {
     let schema = schema_for!(T);
     let value = serde_json::to_value(schema).unwrap();
@@ -600,6 +607,18 @@ impl StelliumServer {
         serde_json::to_string_pretty(&response).unwrap()
     }
 
+    fn search_natal_charts(&self, input: SearchNatalChartsInput) -> String {
+        let charts = self.storage.search_charts(&input.query);
+
+        let response = json!({
+            "query": input.query,
+            "results": charts,
+            "count": charts.len()
+        });
+
+        serde_json::to_string_pretty(&response).unwrap()
+    }
+
     fn get_natal_chart(&self, input: GetNatalChartInput) -> String {
         let chart = match self.storage.get_chart(&input.name) {
             Some(c) => c,
@@ -693,6 +712,11 @@ impl StelliumServer {
                 empty_schema(),
             ),
             Tool::new(
+                "search_natal_charts",
+                "Search for natal charts by name (case-insensitive partial match).",
+                schema_to_value::<SearchNatalChartsInput>(),
+            ),
+            Tool::new(
                 "get_natal_chart",
                 "Get a stored natal chart by name.",
                 schema_to_value::<GetNatalChartInput>(),
@@ -767,6 +791,11 @@ impl ServerHandler for StelliumServer {
                 self.get_transit_report(input)
             }
             "list_natal_charts" => self.list_natal_charts(),
+            "search_natal_charts" => {
+                let input: SearchNatalChartsInput = serde_json::from_value(args)
+                    .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))?;
+                self.search_natal_charts(input)
+            }
             "get_natal_chart" => {
                 let input: GetNatalChartInput = serde_json::from_value(args)
                     .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))?;

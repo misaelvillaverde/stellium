@@ -131,6 +131,24 @@ impl Storage {
         }
     }
 
+    /// Search charts by name (case-insensitive partial match)
+    pub fn search_charts(&self, query: &str) -> Vec<ChartInfo> {
+        let query_lower = query.to_lowercase();
+        if let Ok(charts) = self.charts.read() {
+            charts
+                .values()
+                .filter(|c| c.name.to_lowercase().contains(&query_lower))
+                .map(|c| ChartInfo {
+                    name: c.name.clone(),
+                    birth_date: c.birth_date.clone(),
+                    birth_location: c.birth_location.clone(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Delete a chart by name (deletes first match if multiple)
     pub fn delete_chart(&self, name: &str) -> Result<bool, String> {
         let key_to_remove = {
