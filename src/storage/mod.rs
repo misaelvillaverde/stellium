@@ -90,11 +90,14 @@ impl Storage {
         charts.values().find(|c| c.name == name).cloned()
     }
 
-    /// Get a natal chart by exact composite key (name + birth_date)
+    /// Get a natal chart by exact match of name AND birth_date
     pub fn get_chart_exact(&self, name: &str, birth_date: &str) -> Option<NatalChart> {
-        let key = Self::make_key(name, birth_date);
         let charts = self.charts.read().ok()?;
-        charts.get(&key).cloned()
+        // Search by values to handle both old (name-only) and new (composite) key formats
+        charts
+            .values()
+            .find(|c| c.name == name && c.birth_date == birth_date)
+            .cloned()
     }
 
     /// Get the default chart (first one stored, or None)
@@ -155,20 +158,32 @@ impl Storage {
         }
     }
 
-    /// Delete a chart by exact composite key (name + birth_date)
+    /// Delete a chart by exact match of name AND birth_date
     pub fn delete_chart_exact(&self, name: &str, birth_date: &str) -> Result<bool, String> {
-        let key = Self::make_key(name, birth_date);
-        let removed = {
+        // Find the key for the chart with matching name and birth_date
+        let key_to_remove = {
+            let charts = self
+                .charts
+                .read()
+                .map_err(|_| "Failed to acquire read lock")?;
+            charts
+                .iter()
+                .find(|(_, c)| c.name == name && c.birth_date == birth_date)
+                .map(|(k, _)| k.clone())
+        };
+
+        if let Some(key) = key_to_remove {
             let mut charts = self
                 .charts
                 .write()
                 .map_err(|_| "Failed to acquire write lock")?;
-            charts.remove(&key).is_some()
-        };
-        if removed {
+            charts.remove(&key);
+            drop(charts);
             self.persist()?;
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(removed)
     }
 
     /// Persist charts to disk
