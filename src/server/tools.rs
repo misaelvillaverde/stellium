@@ -108,6 +108,17 @@ pub struct SearchNatalChartsInput {
     pub query: String,
 }
 
+/// Input for compatibility/synastry analysis
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct GetCompatibilityInput {
+    #[schemars(description = "Name of the first person's natal chart")]
+    pub person1_name: String,
+    #[schemars(description = "Name of the second person's natal chart")]
+    pub person2_name: String,
+    #[schemars(description = "Include minor aspects (sextile, quincunx) - default: false")]
+    pub include_minor_aspects: Option<bool>,
+}
+
 fn schema_to_value<T: schemars::JsonSchema>() -> Arc<serde_json::Map<String, Value>> {
     let schema = schema_for!(T);
     let value = serde_json::to_value(schema).unwrap();
@@ -679,6 +690,144 @@ impl StelliumServer {
         }
     }
 
+    fn get_compatibility(&self, input: GetCompatibilityInput) -> String {
+        // Load both charts
+        let chart1 = match self.storage.get_chart(&input.person1_name) {
+            Some(c) => c,
+            None => return json!({
+                "success": false,
+                "error": format!("Natal chart '{}' not found", input.person1_name)
+            }).to_string(),
+        };
+
+        let chart2 = match self.storage.get_chart(&input.person2_name) {
+            Some(c) => c,
+            None => return json!({
+                "success": false,
+                "error": format!("Natal chart '{}' not found", input.person2_name)
+            }).to_string(),
+        };
+
+        let include_minor = input.include_minor_aspects.unwrap_or(false);
+        let mut synastry_aspects = Vec::new();
+        let mut exact_aspects = Vec::new();
+
+        // Compare every planet in chart1 against every planet in chart2
+        for planet1 in Planet::all() {
+            let pos1 = match chart1.planets.get(planet1) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let house1 = chart1.planet_positions.get(planet1).map(|p| p.house);
+
+            for planet2 in Planet::all() {
+                let pos2 = match chart2.planets.get(planet2) {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                let house2 = chart2.planet_positions.get(planet2).map(|p| p.house);
+
+                // Check for aspects
+                if let Some((aspect_type, orb)) = find_aspect(pos1.longitude, pos2.longitude, include_minor) {
+                    let is_exact = orb < 1.0;
+
+                    let aspect_info = json!({
+                        "person1_planet": planet1.to_string(),
+                        "person1_position": pos1.format_degree_sign(),
+                        "person1_house": house1,
+                        "person2_planet": planet2.to_string(),
+                        "person2_position": pos2.format_degree_sign(),
+                        "person2_house": house2,
+                        "aspect": aspect_type.to_string(),
+                        "orb": (orb * 100.0).round() / 100.0,
+                        "is_exact": is_exact,
+                        "is_major": aspect_type.is_major()
+                    });
+
+                    if is_exact {
+                        exact_aspects.push(json!({
+                            "aspect": format!("{} {} {} ({})",
+                                input.person1_name, planet1,
+                                aspect_type,
+                                planet2),
+                            "description": format!("{}'s {} {} {}'s {} (orb: {:.2}°)",
+                                input.person1_name, planet1,
+                                aspect_type,
+                                input.person2_name, planet2,
+                                orb)
+                        }));
+                    }
+
+                    synastry_aspects.push(aspect_info);
+                }
+            }
+        }
+
+        // Build person summaries
+        let person1_summary = json!({
+            "name": chart1.name,
+            "birth_date": chart1.birth_date,
+            "sun": chart1.planets.get(&Planet::Sun).map(|p| p.format_degree_sign()),
+            "moon": chart1.planets.get(&Planet::Moon).map(|p| p.format_degree_sign()),
+            "ascendant": chart1.ascendant.as_ref().map(|p| p.format_degree_sign()),
+            "venus": chart1.planets.get(&Planet::Venus).map(|p| p.format_degree_sign()),
+            "mars": chart1.planets.get(&Planet::Mars).map(|p| p.format_degree_sign())
+        });
+
+        let person2_summary = json!({
+            "name": chart2.name,
+            "birth_date": chart2.birth_date,
+            "sun": chart2.planets.get(&Planet::Sun).map(|p| p.format_degree_sign()),
+            "moon": chart2.planets.get(&Planet::Moon).map(|p| p.format_degree_sign()),
+            "ascendant": chart2.ascendant.as_ref().map(|p| p.format_degree_sign()),
+            "venus": chart2.planets.get(&Planet::Venus).map(|p| p.format_degree_sign()),
+            "mars": chart2.planets.get(&Planet::Mars).map(|p| p.format_degree_sign())
+        });
+
+        // Count aspect types for summary
+        let mut conjunction_count = 0;
+        let mut trine_count = 0;
+        let mut sextile_count = 0;
+        let mut square_count = 0;
+        let mut opposition_count = 0;
+
+        for aspect in &synastry_aspects {
+            match aspect.get("aspect").and_then(|v| v.as_str()) {
+                Some("conjunction") => conjunction_count += 1,
+                Some("trine") => trine_count += 1,
+                Some("sextile") => sextile_count += 1,
+                Some("square") => square_count += 1,
+                Some("opposition") => opposition_count += 1,
+                _ => {}
+            }
+        }
+
+        let response = json!({
+            "success": true,
+            "person1": person1_summary,
+            "person2": person2_summary,
+            "aspects": synastry_aspects,
+            "summary": {
+                "total_aspects": synastry_aspects.len(),
+                "exact_aspects_count": exact_aspects.len(),
+                "exact_aspects": exact_aspects,
+                "aspect_counts": {
+                    "conjunctions": conjunction_count,
+                    "trines": trine_count,
+                    "sextiles": sextile_count,
+                    "squares": square_count,
+                    "oppositions": opposition_count
+                },
+                "harmonious_aspects": trine_count + sextile_count + conjunction_count,
+                "challenging_aspects": square_count + opposition_count
+            }
+        });
+
+        serde_json::to_string_pretty(&response).unwrap()
+    }
+
     fn get_tools(&self) -> Vec<Tool> {
         vec![
             Tool::new(
@@ -725,6 +874,11 @@ impl StelliumServer {
                 "delete_natal_chart",
                 "Delete a stored natal chart. Requires both name and birth date for confirmation.",
                 schema_to_value::<DeleteNatalChartInput>(),
+            ),
+            Tool::new(
+                "get_compatibility",
+                "Analyze synastry/compatibility between two natal charts. Compares all planetary aspects between two people.",
+                schema_to_value::<GetCompatibilityInput>(),
             ),
         ]
     }
@@ -805,6 +959,11 @@ impl ServerHandler for StelliumServer {
                 let input: DeleteNatalChartInput = serde_json::from_value(args)
                     .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))?;
                 self.delete_natal_chart(input)
+            }
+            "get_compatibility" => {
+                let input: GetCompatibilityInput = serde_json::from_value(args)
+                    .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))?;
+                self.get_compatibility(input)
             }
             _ => {
                 return Err(rmcp::ErrorData::invalid_params(
