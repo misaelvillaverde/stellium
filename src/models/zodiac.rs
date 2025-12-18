@@ -109,6 +109,8 @@ pub enum Planet {
     Uranus,
     Neptune,
     Pluto,
+    /// North Node (True Lunar Node) - the ascending lunar node
+    NorthNode,
 }
 
 impl Planet {
@@ -125,28 +127,36 @@ impl Planet {
             Planet::Uranus,
             Planet::Neptune,
             Planet::Pluto,
+            Planet::NorthNode,
         ]
     }
 
     /// Get Swiss Ephemeris body ID
     pub fn swe_id(&self) -> i32 {
         match self {
-            Planet::Sun => 0,      // SE_SUN
-            Planet::Moon => 1,     // SE_MOON
-            Planet::Mercury => 2,  // SE_MERCURY
-            Planet::Venus => 3,    // SE_VENUS
-            Planet::Mars => 4,     // SE_MARS
-            Planet::Jupiter => 5,  // SE_JUPITER
-            Planet::Saturn => 6,   // SE_SATURN
-            Planet::Uranus => 7,   // SE_URANUS
-            Planet::Neptune => 8,  // SE_NEPTUNE
-            Planet::Pluto => 9,    // SE_PLUTO
+            Planet::Sun => 0,       // SE_SUN
+            Planet::Moon => 1,      // SE_MOON
+            Planet::Mercury => 2,   // SE_MERCURY
+            Planet::Venus => 3,     // SE_VENUS
+            Planet::Mars => 4,      // SE_MARS
+            Planet::Jupiter => 5,   // SE_JUPITER
+            Planet::Saturn => 6,    // SE_SATURN
+            Planet::Uranus => 7,    // SE_URANUS
+            Planet::Neptune => 8,   // SE_NEPTUNE
+            Planet::Pluto => 9,     // SE_PLUTO
+            Planet::NorthNode => 11, // SE_TRUE_NODE (True Lunar Node)
         }
     }
 
-    /// Whether this planet can be retrograde (Sun and Moon cannot)
+    /// Whether this body can be retrograde
+    /// Sun and Moon cannot retrograde; North Node is always retrograde (apparent motion)
     pub fn can_retrograde(&self) -> bool {
         !matches!(self, Planet::Sun | Planet::Moon)
+    }
+
+    /// Whether this is a lunar node (for special handling)
+    pub fn is_lunar_node(&self) -> bool {
+        matches!(self, Planet::NorthNode)
     }
 }
 
@@ -163,6 +173,7 @@ impl fmt::Display for Planet {
             Planet::Uranus => "Uranus",
             Planet::Neptune => "Neptune",
             Planet::Pluto => "Pluto",
+            Planet::NorthNode => "North Node",
         };
         write!(f, "{}", name)
     }

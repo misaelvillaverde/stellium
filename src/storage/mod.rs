@@ -9,13 +9,30 @@ use directories::ProjectDirs;
 
 use crate::models::NatalChart;
 
+use serde::Serialize;
+
+/// Chart info for listing
+#[derive(Debug, Clone, Serialize)]
+pub struct ChartInfo {
+    pub name: String,
+    pub birth_date: String,
+    pub birth_location: String,
+}
+
 /// Storage backend for natal charts
+/// Uses composite key (name + birth_date) to prevent duplicates
 pub struct Storage {
+    /// Charts stored by composite key: "{name}_{birth_date}"
     charts: RwLock<HashMap<String, NatalChart>>,
     storage_path: PathBuf,
 }
 
 impl Storage {
+    /// Create composite key from name and birth_date
+    fn make_key(name: &str, birth_date: &str) -> String {
+        format!("{}_{}", name, birth_date)
+    }
+
     /// Create a new storage instance
     pub fn new() -> Result<Self, String> {
         let storage_path = Self::get_storage_path()?;
@@ -26,7 +43,7 @@ impl Storage {
                 .map_err(|e| format!("Failed to create storage directory: {}", e))?;
         }
 
-        let charts = if storage_path.exists() {
+        let charts: HashMap<String, NatalChart> = if storage_path.exists() {
             let data = fs::read_to_string(&storage_path)
                 .map_err(|e| format!("Failed to read storage file: {}", e))?;
             serde_json::from_str(&data)
@@ -52,23 +69,32 @@ impl Storage {
         }
     }
 
-    /// Save a natal chart
+    /// Save a natal chart using composite key (name + birth_date)
     pub fn save_chart(&self, chart: NatalChart) -> Result<(), String> {
+        let key = Self::make_key(&chart.name, &chart.birth_date);
         {
             let mut charts = self
                 .charts
                 .write()
                 .map_err(|_| "Failed to acquire write lock")?;
-            charts.insert(chart.name.clone(), chart);
+            charts.insert(key, chart);
         }
         self.persist()?;
         Ok(())
     }
 
-    /// Get a natal chart by name
+    /// Get a natal chart by name (returns first match if multiple with same name)
     pub fn get_chart(&self, name: &str) -> Option<NatalChart> {
         let charts = self.charts.read().ok()?;
-        charts.get(name).cloned()
+        // Search for any chart with matching name
+        charts.values().find(|c| c.name == name).cloned()
+    }
+
+    /// Get a natal chart by exact composite key (name + birth_date)
+    pub fn get_chart_exact(&self, name: &str, birth_date: &str) -> Option<NatalChart> {
+        let key = Self::make_key(name, birth_date);
+        let charts = self.charts.read().ok()?;
+        charts.get(&key).cloned()
     }
 
     /// Get the default chart (first one stored, or None)
@@ -77,23 +103,67 @@ impl Storage {
         charts.values().next().cloned()
     }
 
-    /// List all stored chart names
-    pub fn list_charts(&self) -> Vec<String> {
+    /// List all stored charts with their info
+    pub fn list_charts(&self) -> Vec<ChartInfo> {
         if let Ok(charts) = self.charts.read() {
-            charts.keys().cloned().collect()
+            charts
+                .values()
+                .map(|c| ChartInfo {
+                    name: c.name.clone(),
+                    birth_date: c.birth_date.clone(),
+                    birth_location: c.birth_location.clone(),
+                })
+                .collect()
         } else {
             Vec::new()
         }
     }
 
-    /// Delete a chart by name
+    /// List chart names only (for backward compatibility)
+    pub fn list_chart_names(&self) -> Vec<String> {
+        if let Ok(charts) = self.charts.read() {
+            charts.values().map(|c| c.name.clone()).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Delete a chart by name (deletes first match if multiple)
     pub fn delete_chart(&self, name: &str) -> Result<bool, String> {
+        let key_to_remove = {
+            let charts = self
+                .charts
+                .read()
+                .map_err(|_| "Failed to acquire read lock")?;
+            charts
+                .iter()
+                .find(|(_, c)| c.name == name)
+                .map(|(k, _)| k.clone())
+        };
+
+        if let Some(key) = key_to_remove {
+            let mut charts = self
+                .charts
+                .write()
+                .map_err(|_| "Failed to acquire write lock")?;
+            charts.remove(&key);
+            drop(charts);
+            self.persist()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Delete a chart by exact composite key (name + birth_date)
+    pub fn delete_chart_exact(&self, name: &str, birth_date: &str) -> Result<bool, String> {
+        let key = Self::make_key(name, birth_date);
         let removed = {
             let mut charts = self
                 .charts
                 .write()
                 .map_err(|_| "Failed to acquire write lock")?;
-            charts.remove(name).is_some()
+            charts.remove(&key).is_some()
         };
         if removed {
             self.persist()?;

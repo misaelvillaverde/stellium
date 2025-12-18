@@ -46,6 +46,25 @@ impl StoreNatalChartRequest {
     }
 }
 
+/// House cusp data for a natal chart
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HouseCusps {
+    /// All 12 house cusps (index 0 = 1st house cusp, etc.)
+    pub cusps: Vec<ZodiacPosition>,
+    /// House system used (e.g., "Placidus", "Whole Sign")
+    pub system: String,
+}
+
+/// Planet position with house placement
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanetPosition {
+    pub position: ZodiacPosition,
+    /// Which house this planet is in (1-12)
+    pub house: u8,
+    /// Whether the planet is retrograde
+    pub is_retrograde: bool,
+}
+
 /// Stored natal chart with calculated positions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NatalChart {
@@ -57,14 +76,26 @@ pub struct NatalChart {
     pub longitude: f64,
     pub timezone: String,
 
-    /// Planetary positions at birth
+    /// Planetary positions at birth (legacy format for compatibility)
     pub planets: HashMap<Planet, ZodiacPosition>,
+
+    /// Planetary positions with house placements
+    #[serde(default)]
+    pub planet_positions: HashMap<Planet, PlanetPosition>,
 
     /// Ascendant (rising sign)
     pub ascendant: Option<ZodiacPosition>,
 
     /// Midheaven (MC)
     pub midheaven: Option<ZodiacPosition>,
+
+    /// Vertex point
+    #[serde(default)]
+    pub vertex: Option<ZodiacPosition>,
+
+    /// All 12 house cusps
+    #[serde(default)]
+    pub houses: Option<HouseCusps>,
 }
 
 impl NatalChart {
@@ -78,14 +109,30 @@ impl NatalChart {
             longitude: request.longitude,
             timezone: request.timezone.clone(),
             planets: HashMap::new(),
+            planet_positions: HashMap::new(),
             ascendant: None,
             midheaven: None,
+            vertex: None,
+            houses: None,
         }
     }
 
     /// Get position for a planet
     pub fn get_planet_position(&self, planet: &Planet) -> Option<&ZodiacPosition> {
         self.planets.get(planet)
+    }
+
+    /// Get house number (1-12) for a planet
+    pub fn get_planet_house(&self, planet: &Planet) -> Option<u8> {
+        self.planet_positions.get(planet).map(|p| p.house)
+    }
+
+    /// Get house cusp position by house number (1-12)
+    pub fn get_house_cusp(&self, house_num: u8) -> Option<&ZodiacPosition> {
+        if house_num < 1 || house_num > 12 {
+            return None;
+        }
+        self.houses.as_ref().and_then(|h| h.cusps.get((house_num - 1) as usize))
     }
 }
 
@@ -97,48 +144,105 @@ pub struct StoreNatalChartResponse {
     pub natal_chart: NatalChartSummary,
 }
 
+/// Detailed planet position for summary output
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct PlanetSummary {
+    /// Position as "X° Sign" format
+    pub position: String,
+    /// House number (1-12)
+    pub house: Option<u8>,
+    /// Whether retrograde
+    pub retrograde: bool,
+}
+
+/// House cusp summary
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct HouseSummary {
+    /// House number (1-12)
+    pub house: u8,
+    /// Cusp position as "X° Sign" format
+    pub cusp: String,
+}
+
 /// Summary of natal chart positions for display
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct NatalChartSummary {
-    pub sun: String,
-    pub moon: String,
+    pub sun: PlanetSummary,
+    pub moon: PlanetSummary,
+    pub mercury: PlanetSummary,
+    pub venus: PlanetSummary,
+    pub mars: PlanetSummary,
+    pub jupiter: PlanetSummary,
+    pub saturn: PlanetSummary,
+    pub uranus: PlanetSummary,
+    pub neptune: PlanetSummary,
+    pub pluto: PlanetSummary,
+    pub north_node: PlanetSummary,
     pub ascendant: String,
-    pub mercury: String,
-    pub venus: String,
-    pub mars: String,
-    pub jupiter: String,
-    pub saturn: String,
-    pub uranus: String,
-    pub neptune: String,
-    pub pluto: String,
+    pub midheaven: String,
+    pub houses: Vec<HouseSummary>,
 }
 
 impl From<&NatalChart> for NatalChartSummary {
     fn from(chart: &NatalChart) -> Self {
-        let get_pos = |planet: Planet| -> String {
-            chart
+        let get_planet_summary = |planet: Planet| -> PlanetSummary {
+            let position = chart
                 .planets
                 .get(&planet)
                 .map(|p| p.format_degree_sign())
-                .unwrap_or_else(|| "Unknown".to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            let (house, retrograde) = chart
+                .planet_positions
+                .get(&planet)
+                .map(|p| (Some(p.house), p.is_retrograde))
+                .unwrap_or((None, false));
+
+            PlanetSummary {
+                position,
+                house,
+                retrograde,
+            }
         };
 
+        let houses: Vec<HouseSummary> = chart
+            .houses
+            .as_ref()
+            .map(|h| {
+                h.cusps
+                    .iter()
+                    .enumerate()
+                    .map(|(i, cusp)| HouseSummary {
+                        house: (i + 1) as u8,
+                        cusp: cusp.format_degree_sign(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Self {
-            sun: get_pos(Planet::Sun),
-            moon: get_pos(Planet::Moon),
+            sun: get_planet_summary(Planet::Sun),
+            moon: get_planet_summary(Planet::Moon),
+            mercury: get_planet_summary(Planet::Mercury),
+            venus: get_planet_summary(Planet::Venus),
+            mars: get_planet_summary(Planet::Mars),
+            jupiter: get_planet_summary(Planet::Jupiter),
+            saturn: get_planet_summary(Planet::Saturn),
+            uranus: get_planet_summary(Planet::Uranus),
+            neptune: get_planet_summary(Planet::Neptune),
+            pluto: get_planet_summary(Planet::Pluto),
+            north_node: get_planet_summary(Planet::NorthNode),
             ascendant: chart
                 .ascendant
                 .as_ref()
                 .map(|p| p.format_degree_sign())
                 .unwrap_or_else(|| "Unknown".to_string()),
-            mercury: get_pos(Planet::Mercury),
-            venus: get_pos(Planet::Venus),
-            mars: get_pos(Planet::Mars),
-            jupiter: get_pos(Planet::Jupiter),
-            saturn: get_pos(Planet::Saturn),
-            uranus: get_pos(Planet::Uranus),
-            neptune: get_pos(Planet::Neptune),
-            pluto: get_pos(Planet::Pluto),
+            midheaven: chart
+                .midheaven
+                .as_ref()
+                .map(|p| p.format_degree_sign())
+                .unwrap_or_else(|| "Unknown".to_string()),
+            houses,
         }
     }
 }

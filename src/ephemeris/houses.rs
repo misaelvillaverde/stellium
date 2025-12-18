@@ -88,3 +88,47 @@ pub fn calc_asc_mc(
     let houses = calc_houses(julian_day, latitude, longitude, HOUSE_PLACIDUS)?;
     Ok((houses.ascendant_position(), houses.midheaven_position()))
 }
+
+/// Determine which house (1-12) a planet is in based on house cusps
+/// Uses the Placidus-style house determination where a planet is in a house
+/// if its longitude is between that house cusp and the next house cusp
+pub fn planet_in_house(planet_longitude: f64, house_cusps: &[f64; 12]) -> u8 {
+    let lon = planet_longitude.rem_euclid(360.0);
+
+    for i in 0..12 {
+        let cusp_start = house_cusps[i];
+        let cusp_end = house_cusps[(i + 1) % 12];
+
+        // Handle wrap-around at 360°/0°
+        let in_house = if cusp_start <= cusp_end {
+            // Normal case: cusp_start < planet < cusp_end
+            lon >= cusp_start && lon < cusp_end
+        } else {
+            // Wrap-around case: e.g., cusp_start = 350°, cusp_end = 20°
+            lon >= cusp_start || lon < cusp_end
+        };
+
+        if in_house {
+            return (i + 1) as u8;
+        }
+    }
+
+    // Fallback (shouldn't happen with valid data)
+    1
+}
+
+/// Get house system name from code
+pub fn house_system_name(code: i8) -> &'static str {
+    match code as u8 as char {
+        'P' => "Placidus",
+        'K' => "Koch",
+        'E' => "Equal",
+        'W' => "Whole Sign",
+        'R' => "Regiomontanus",
+        'C' => "Campanus",
+        'B' => "Alcabitius",
+        'M' => "Morinus",
+        'O' => "Porphyry",
+        _ => "Unknown",
+    }
+}

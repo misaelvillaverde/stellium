@@ -16,16 +16,17 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::ephemeris::{
-    calc_all_planets, calc_asc_mc, calc_planet_position, calc_sun_moon_angle, date_to_julian_day,
+    calc_all_planets, calc_houses, calc_planet_position, calc_sun_moon_angle, date_to_julian_day,
     find_next_full_moon, find_next_new_moon, find_next_sign_ingress, find_next_station,
-    julian_day_to_date, local_datetime_to_julian_day,
+    house_system_name, julian_day_to_date, local_datetime_to_julian_day, planet_in_house,
+    HOUSE_PLACIDUS,
 };
 use crate::models::{
-    find_aspect, Aspect, DateRange, GetDailyTransitsResponse,
-    GetLunarInfoResponse, GetRetrogradeStatusResponse, GetTransitReportResponse, LunarCycle,
-    LunarEvent, LunarPhase, LunarPhaseName, MajorEvent, NatalChart, NatalChartSummary, Planet,
-    RetrogradeInfo, StoreNatalChartRequest, StoreNatalChartResponse, Transit,
-    UpcomingRetrograde, VoidOfCourse,
+    find_aspect, Aspect, DateRange, GetDailyTransitsResponse, GetLunarInfoResponse,
+    GetRetrogradeStatusResponse, GetTransitReportResponse, HouseCusps, LunarCycle, LunarEvent,
+    LunarPhase, LunarPhaseName, MajorEvent, NatalChart, NatalChartSummary, Planet, PlanetPosition,
+    RetrogradeInfo, StoreNatalChartRequest, StoreNatalChartResponse, Transit, UpcomingRetrograde,
+    VoidOfCourse, ZodiacPosition,
 };
 use crate::storage::Storage;
 
@@ -89,6 +90,15 @@ pub struct TransitReportInput {
 pub struct GetNatalChartInput {
     #[schemars(description = "Name of the natal chart to retrieve")]
     pub name: String,
+}
+
+/// Input for deleting a natal chart
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DeleteNatalChartInput {
+    #[schemars(description = "Name of the natal chart to delete")]
+    pub name: String,
+    #[schemars(description = "Birth date of the chart to delete (for confirmation) in YYYY-MM-DD format")]
+    pub birth_date: String,
 }
 
 fn schema_to_value<T: schemars::JsonSchema>() -> Arc<serde_json::Map<String, Value>> {
@@ -157,6 +167,26 @@ impl StelliumServer {
 
         let mut chart = NatalChart::new(&request);
 
+        // Calculate house positions (Placidus by default)
+        let house_data = match calc_houses(julian_day, request.latitude, request.longitude, HOUSE_PLACIDUS) {
+            Ok(h) => h,
+            Err(e) => return json!({
+                "success": false,
+                "error": format!("Failed to calculate houses: {}", e)
+            }).to_string(),
+        };
+
+        // Store house cusps
+        chart.houses = Some(HouseCusps {
+            cusps: house_data.cusps.iter().map(|&lon| ZodiacPosition::from_longitude(lon)).collect(),
+            system: house_system_name(HOUSE_PLACIDUS).to_string(),
+        });
+
+        chart.ascendant = Some(ZodiacPosition::from_longitude(house_data.ascendant));
+        chart.midheaven = Some(ZodiacPosition::from_longitude(house_data.midheaven));
+        chart.vertex = Some(ZodiacPosition::from_longitude(house_data.vertex));
+
+        // Calculate planetary positions
         let positions = match calc_all_planets(julian_day) {
             Ok(p) => p,
             Err(e) => return json!({
@@ -166,12 +196,18 @@ impl StelliumServer {
         };
 
         for (planet, position) in positions {
-            chart.planets.insert(planet, position.to_zodiac_position());
-        }
+            let zodiac_pos = position.to_zodiac_position();
+            let house = planet_in_house(position.longitude, &house_data.cusps);
 
-        if let Ok((asc, mc)) = calc_asc_mc(julian_day, request.latitude, request.longitude) {
-            chart.ascendant = Some(asc);
-            chart.midheaven = Some(mc);
+            // Store in legacy format for compatibility
+            chart.planets.insert(planet, zodiac_pos.clone());
+
+            // Store in new format with house placement
+            chart.planet_positions.insert(planet, PlanetPosition {
+                position: zodiac_pos,
+                house,
+                is_retrograde: position.is_retrograde,
+            });
         }
 
         if let Err(e) = self.storage.save_chart(chart.clone()) {
@@ -585,6 +621,45 @@ impl StelliumServer {
         serde_json::to_string_pretty(&response).unwrap()
     }
 
+    fn delete_natal_chart(&self, input: DeleteNatalChartInput) -> String {
+        // Verify the chart exists with exact name and birth_date match
+        let chart = match self.storage.get_chart_exact(&input.name, &input.birth_date) {
+            Some(c) => c,
+            None => {
+                // Check if a chart with this name exists but different birth date
+                if let Some(existing) = self.storage.get_chart(&input.name) {
+                    return json!({
+                        "success": false,
+                        "error": format!(
+                            "Chart '{}' exists but with birth date '{}'. You provided '{}'. Please use the correct birth date to delete.",
+                            input.name, existing.birth_date, input.birth_date
+                        )
+                    }).to_string();
+                }
+                return json!({
+                    "success": false,
+                    "error": format!("Natal chart '{}' not found", input.name)
+                }).to_string();
+            }
+        };
+
+        // Delete the chart using exact key
+        match self.storage.delete_chart_exact(&input.name, &input.birth_date) {
+            Ok(true) => json!({
+                "success": true,
+                "message": format!("Natal chart '{}' (born {}) has been deleted", chart.name, chart.birth_date)
+            }).to_string(),
+            Ok(false) => json!({
+                "success": false,
+                "error": format!("Natal chart '{}' not found", input.name)
+            }).to_string(),
+            Err(e) => json!({
+                "success": false,
+                "error": format!("Failed to delete chart: {}", e)
+            }).to_string(),
+        }
+    }
+
     fn get_tools(&self) -> Vec<Tool> {
         vec![
             Tool::new(
@@ -621,6 +696,11 @@ impl StelliumServer {
                 "get_natal_chart",
                 "Get a stored natal chart by name.",
                 schema_to_value::<GetNatalChartInput>(),
+            ),
+            Tool::new(
+                "delete_natal_chart",
+                "Delete a stored natal chart. Requires both name and birth date for confirmation.",
+                schema_to_value::<DeleteNatalChartInput>(),
             ),
         ]
     }
@@ -691,6 +771,11 @@ impl ServerHandler for StelliumServer {
                 let input: GetNatalChartInput = serde_json::from_value(args)
                     .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))?;
                 self.get_natal_chart(input)
+            }
+            "delete_natal_chart" => {
+                let input: DeleteNatalChartInput = serde_json::from_value(args)
+                    .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))?;
+                self.delete_natal_chart(input)
             }
             _ => {
                 return Err(rmcp::ErrorData::invalid_params(
