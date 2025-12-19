@@ -23,10 +23,10 @@ use crate::ephemeris::{
 };
 use crate::models::{
     find_aspect, Aspect, DateRange, GetDailyTransitsResponse, GetLunarInfoResponse,
-    GetRetrogradeStatusResponse, GetTransitReportResponse, HouseCusps, LunarCycle, LunarEvent,
-    LunarPhase, LunarPhaseName, MajorEvent, NatalChart, NatalChartSummary, Planet, PlanetPosition,
-    RetrogradeInfo, StoreNatalChartRequest, StoreNatalChartResponse, Transit, UpcomingRetrograde,
-    VoidOfCourse, ZodiacPosition,
+    GetRetrogradeStatusResponse, GetTransitReportResponse, HouseCusps, LifeArea, LunarCycle,
+    LunarEvent, LunarPhase, LunarPhaseName, MajorEvent, NatalChart, NatalChartSummary, Planet,
+    PlanetPosition, RetrogradeInfo, StoreNatalChartRequest, StoreNatalChartResponse, Transit,
+    UpcomingRetrograde, VoidOfCourse, ZodiacPosition,
 };
 use crate::storage::Storage;
 
@@ -117,6 +117,26 @@ pub struct GetCompatibilityInput {
     pub person2_name: String,
     #[schemars(description = "Include minor aspects (sextile, quincunx) - default: false")]
     pub include_minor_aspects: Option<bool>,
+}
+
+/// Input for full chart analysis
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct GetFullChartAnalysisInput {
+    #[schemars(description = "Name of the natal chart to analyze")]
+    pub name: String,
+    #[schemars(description = "Date for transit analysis in YYYY-MM-DD format (defaults to today)")]
+    pub date: Option<String>,
+}
+
+/// Input for relationship transit analysis
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct GetRelationshipTransitAnalysisInput {
+    #[schemars(description = "Name of the first person's natal chart")]
+    pub person1_name: String,
+    #[schemars(description = "Name of the second person's natal chart")]
+    pub person2_name: String,
+    #[schemars(description = "Date for transit analysis in YYYY-MM-DD format (defaults to today)")]
+    pub date: Option<String>,
 }
 
 fn schema_to_value<T: schemars::JsonSchema>() -> Arc<serde_json::Map<String, Value>> {
@@ -828,6 +848,346 @@ impl StelliumServer {
         serde_json::to_string_pretty(&response).unwrap()
     }
 
+    fn get_full_chart_analysis(&self, input: GetFullChartAnalysisInput) -> String {
+        // Get the natal chart
+        let chart = match self.storage.get_chart(&input.name) {
+            Some(c) => c,
+            None => {
+                return json!({
+                    "success": false,
+                    "error": format!("Natal chart '{}' not found", input.name)
+                })
+                .to_string()
+            }
+        };
+
+        // Parse date (default to today)
+        let date_str = input.date.unwrap_or_else(|| {
+            chrono::Local::now().format("%Y-%m-%d").to_string()
+        });
+        let parsed_date = match NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+            Ok(d) => d,
+            Err(e) => {
+                return json!({
+                    "success": false,
+                    "error": format!("Invalid date format: {}. Expected YYYY-MM-DD", e)
+                })
+                .to_string()
+            }
+        };
+
+        let julian_day = date_to_julian_day(parsed_date);
+
+        // Calculate current planetary positions
+        let positions = match calc_all_planets(julian_day) {
+            Ok(p) => p,
+            Err(e) => {
+                return json!({
+                    "success": false,
+                    "error": format!("Failed to calculate positions: {}", e)
+                })
+                .to_string()
+            }
+        };
+
+        // Build daily transits with aspects
+        let mut transits = Vec::new();
+        for (planet, position) in &positions {
+            let mut aspects_to_natal = Vec::new();
+            for (natal_planet, natal_pos) in &chart.planets {
+                if let Some((aspect_type, orb)) =
+                    find_aspect(position.longitude, natal_pos.longitude, false)
+                {
+                    aspects_to_natal.push(json!({
+                        "natal_planet": natal_planet.to_string(),
+                        "aspect": aspect_type.to_string(),
+                        "orb": (orb * 10.0).round() / 10.0
+                    }));
+                }
+            }
+
+            let zodiac_pos = position.to_zodiac_position();
+            transits.push(json!({
+                "planet": planet.to_string(),
+                "sign": zodiac_pos.sign,
+                "degree": (zodiac_pos.degree * 10.0).round() / 10.0,
+                "retrograde": position.is_retrograde,
+                "aspects_to_natal": aspects_to_natal
+            }));
+        }
+
+        // Get lunar info
+        let moon_pos = positions
+            .iter()
+            .find(|(p, _)| *p == Planet::Moon)
+            .map(|(_, pos)| pos);
+        let phase_angle = calc_sun_moon_angle(julian_day).unwrap_or(0.0);
+        let lunar_phase = moon_pos.map(|mp| {
+            let zodiac = mp.to_zodiac_position();
+            json!({
+                "phase_name": LunarPhaseName::from_phase_angle(phase_angle).to_string(),
+                "moon_sign": zodiac.sign,
+                "moon_degree": (zodiac.degree * 10.0).round() / 10.0,
+                "illumination": (LunarPhaseName::illumination_from_angle(phase_angle) * 100.0).round()
+            })
+        });
+
+        // Get retrograde status
+        let mut retrograde_planets = Vec::new();
+        for (planet, pos) in &positions {
+            if pos.is_retrograde && planet.can_retrograde() {
+                retrograde_planets.push(planet.to_string());
+            }
+        }
+
+        // Build life area transits
+        let mut life_area_transits = serde_json::Map::new();
+
+        if let Some(ref houses) = chart.houses {
+            for area in LifeArea::all() {
+                let house_num = area.house_number();
+                let house_idx = (house_num - 1) as usize;
+
+                if house_idx < houses.cusps.len() {
+                    let cusp = &houses.cusps[house_idx];
+                    let ruler_planet = cusp.sign.ruler();
+
+                    // Find transiting planets in this house
+                    let mut planets_in_house = Vec::new();
+                    let cusp_longitudes: [f64; 12] = houses.cusps.iter()
+                        .map(|c| c.longitude)
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .unwrap_or([0.0; 12]);
+                    for (planet, pos) in &positions {
+                        let transit_house = planet_in_house(pos.longitude, &cusp_longitudes);
+                        if transit_house == house_num {
+                            planets_in_house.push(json!({
+                                "planet": planet.to_string(),
+                                "degree": format!("{}° {}", pos.to_zodiac_position().degree.round() as i32, pos.to_zodiac_position().sign),
+                                "retrograde": pos.is_retrograde
+                            }));
+                        }
+                    }
+
+                    // Find aspects to house ruler in natal chart
+                    let mut aspects_to_ruler = Vec::new();
+                    if let Some(natal_ruler_pos) = chart.planets.get(&ruler_planet) {
+                        for (transit_planet, transit_pos) in &positions {
+                            if let Some((aspect_type, orb)) =
+                                find_aspect(transit_pos.longitude, natal_ruler_pos.longitude, false)
+                            {
+                                aspects_to_ruler.push(json!({
+                                    "transiting_planet": transit_planet.to_string(),
+                                    "aspect": aspect_type.to_string(),
+                                    "orb": (orb * 10.0).round() / 10.0
+                                }));
+                            }
+                        }
+                    }
+
+                    life_area_transits.insert(
+                        area.to_string().to_lowercase(),
+                        json!({
+                            "house": house_num,
+                            "description": area.description(),
+                            "cusp_sign": cusp.sign.to_string(),
+                            "ruler": ruler_planet.to_string(),
+                            "transiting_planets": planets_in_house,
+                            "aspects_to_ruler": aspects_to_ruler
+                        }),
+                    );
+                }
+            }
+        }
+
+        // Build natal chart summary
+        let natal_summary = NatalChartSummary::from(&chart);
+
+        let response = json!({
+            "success": true,
+            "date": date_str,
+            "natal_chart": {
+                "name": chart.name,
+                "birth_date": chart.birth_date,
+                "birth_time": chart.birth_time,
+                "birth_location": chart.birth_location,
+                "positions": natal_summary
+            },
+            "daily_transits": transits,
+            "lunar_info": lunar_phase,
+            "retrograde_status": {
+                "retrograde_planets": retrograde_planets
+            },
+            "life_area_transits": life_area_transits
+        });
+
+        serde_json::to_string_pretty(&response).unwrap()
+    }
+
+    fn get_relationship_transit_analysis(&self, input: GetRelationshipTransitAnalysisInput) -> String {
+        // Load both charts
+        let chart1 = match self.storage.get_chart(&input.person1_name) {
+            Some(c) => c,
+            None => {
+                return json!({
+                    "success": false,
+                    "error": format!("Natal chart '{}' not found", input.person1_name)
+                })
+                .to_string()
+            }
+        };
+
+        let chart2 = match self.storage.get_chart(&input.person2_name) {
+            Some(c) => c,
+            None => {
+                return json!({
+                    "success": false,
+                    "error": format!("Natal chart '{}' not found", input.person2_name)
+                })
+                .to_string()
+            }
+        };
+
+        // Parse date (default to today)
+        let date_str = input.date.unwrap_or_else(|| {
+            chrono::Local::now().format("%Y-%m-%d").to_string()
+        });
+        let parsed_date = match NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+            Ok(d) => d,
+            Err(e) => {
+                return json!({
+                    "success": false,
+                    "error": format!("Invalid date format: {}. Expected YYYY-MM-DD", e)
+                })
+                .to_string()
+            }
+        };
+
+        let julian_day = date_to_julian_day(parsed_date);
+
+        // Calculate current planetary positions
+        let positions = match calc_all_planets(julian_day) {
+            Ok(p) => p,
+            Err(e) => {
+                return json!({
+                    "success": false,
+                    "error": format!("Failed to calculate positions: {}", e)
+                })
+                .to_string()
+            }
+        };
+
+        // Build synastry aspects
+        let mut synastry_aspects = Vec::new();
+        for planet1 in Planet::all() {
+            let pos1 = match chart1.planets.get(planet1) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            for planet2 in Planet::all() {
+                let pos2 = match chart2.planets.get(planet2) {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                if let Some((aspect_type, orb)) = find_aspect(pos1.longitude, pos2.longitude, false) {
+                    synastry_aspects.push(json!({
+                        "person1_planet": planet1.to_string(),
+                        "person2_planet": planet2.to_string(),
+                        "aspect": aspect_type.to_string(),
+                        "orb": (orb * 100.0).round() / 100.0,
+                        "is_exact": orb < 1.0
+                    }));
+                }
+            }
+        }
+
+        // Build transits for person 1
+        let mut person1_transits = Vec::new();
+        for (transit_planet, transit_pos) in &positions {
+            for (natal_planet, natal_pos) in &chart1.planets {
+                if let Some((aspect_type, orb)) =
+                    find_aspect(transit_pos.longitude, natal_pos.longitude, false)
+                {
+                    person1_transits.push(json!({
+                        "transiting_planet": transit_planet.to_string(),
+                        "natal_planet": natal_planet.to_string(),
+                        "aspect": aspect_type.to_string(),
+                        "orb": (orb * 10.0).round() / 10.0
+                    }));
+                }
+            }
+        }
+
+        // Build transits for person 2
+        let mut person2_transits = Vec::new();
+        for (transit_planet, transit_pos) in &positions {
+            for (natal_planet, natal_pos) in &chart2.planets {
+                if let Some((aspect_type, orb)) =
+                    find_aspect(transit_pos.longitude, natal_pos.longitude, false)
+                {
+                    person2_transits.push(json!({
+                        "transiting_planet": transit_planet.to_string(),
+                        "natal_planet": natal_planet.to_string(),
+                        "aspect": aspect_type.to_string(),
+                        "orb": (orb * 10.0).round() / 10.0
+                    }));
+                }
+            }
+        }
+
+        // Get lunar context
+        let phase_angle = calc_sun_moon_angle(julian_day).unwrap_or(0.0);
+        let moon_pos = positions
+            .iter()
+            .find(|(p, _)| *p == Planet::Moon)
+            .map(|(_, pos)| pos.to_zodiac_position());
+
+        let lunar_context = json!({
+            "phase": LunarPhaseName::from_phase_angle(phase_angle).to_string(),
+            "moon_sign": moon_pos.as_ref().map(|p| p.sign.to_string()),
+            "illumination": (LunarPhaseName::illumination_from_angle(phase_angle) * 100.0).round()
+        });
+
+        // Count aspect types for summary
+        let mut harmonious = 0;
+        let mut challenging = 0;
+        for aspect in &synastry_aspects {
+            let aspect_str = aspect.get("aspect").and_then(|v| v.as_str()).unwrap_or("");
+            match aspect_str {
+                "trine" | "sextile" | "conjunction" => harmonious += 1,
+                "square" | "opposition" => challenging += 1,
+                _ => {}
+            }
+        }
+
+        let response = json!({
+            "success": true,
+            "date": date_str,
+            "synastry": {
+                "aspects": synastry_aspects,
+                "summary": {
+                    "total_aspects": synastry_aspects.len(),
+                    "harmonious": harmonious,
+                    "challenging": challenging
+                }
+            },
+            "person1_transits": {
+                "name": chart1.name,
+                "aspects": person1_transits
+            },
+            "person2_transits": {
+                "name": chart2.name,
+                "aspects": person2_transits
+            },
+            "lunar_context": lunar_context
+        });
+
+        serde_json::to_string_pretty(&response).unwrap()
+    }
+
     fn get_tools(&self) -> Vec<Tool> {
         vec![
             Tool::new(
@@ -879,6 +1239,16 @@ impl StelliumServer {
                 "get_compatibility",
                 "Analyze synastry/compatibility between two natal charts. Compares all planetary aspects between two people.",
                 schema_to_value::<GetCompatibilityInput>(),
+            ),
+            Tool::new(
+                "get_full_chart_analysis",
+                "Comprehensive analysis combining natal chart, daily transits, lunar info, retrograde status, and life area transits. Includes house rulers and aspects to each life area.",
+                schema_to_value::<GetFullChartAnalysisInput>(),
+            ),
+            Tool::new(
+                "get_relationship_transit_analysis",
+                "Combined relationship analysis with synastry aspects plus both partners' current transits and lunar context for a given date.",
+                schema_to_value::<GetRelationshipTransitAnalysisInput>(),
             ),
         ]
     }
@@ -964,6 +1334,16 @@ impl ServerHandler for StelliumServer {
                 let input: GetCompatibilityInput = serde_json::from_value(args)
                     .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))?;
                 self.get_compatibility(input)
+            }
+            "get_full_chart_analysis" => {
+                let input: GetFullChartAnalysisInput = serde_json::from_value(args)
+                    .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))?;
+                self.get_full_chart_analysis(input)
+            }
+            "get_relationship_transit_analysis" => {
+                let input: GetRelationshipTransitAnalysisInput = serde_json::from_value(args)
+                    .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))?;
+                self.get_relationship_transit_analysis(input)
             }
             _ => {
                 return Err(rmcp::ErrorData::invalid_params(
