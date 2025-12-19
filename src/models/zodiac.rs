@@ -73,6 +73,24 @@ impl ZodiacSign {
     pub fn next(&self) -> Self {
         Self::from_index(self.index() + 1)
     }
+
+    /// Get the traditional ruling planet for this sign
+    pub fn ruler(&self) -> Planet {
+        match self {
+            ZodiacSign::Aries => Planet::Mars,
+            ZodiacSign::Taurus => Planet::Venus,
+            ZodiacSign::Gemini => Planet::Mercury,
+            ZodiacSign::Cancer => Planet::Moon,
+            ZodiacSign::Leo => Planet::Sun,
+            ZodiacSign::Virgo => Planet::Mercury,
+            ZodiacSign::Libra => Planet::Venus,
+            ZodiacSign::Scorpio => Planet::Pluto, // Modern ruler (traditional: Mars)
+            ZodiacSign::Sagittarius => Planet::Jupiter,
+            ZodiacSign::Capricorn => Planet::Saturn,
+            ZodiacSign::Aquarius => Planet::Uranus, // Modern ruler (traditional: Saturn)
+            ZodiacSign::Pisces => Planet::Neptune, // Modern ruler (traditional: Jupiter)
+        }
+    }
 }
 
 impl fmt::Display for ZodiacSign {

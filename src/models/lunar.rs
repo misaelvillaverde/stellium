@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use super::ZodiacSign;
 
@@ -50,6 +51,22 @@ impl LunarPhaseName {
         let normalized = angle.rem_euclid(360.0);
         let radians = normalized.to_radians();
         (1.0 - radians.cos()) / 2.0
+    }
+}
+
+impl fmt::Display for LunarPhaseName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            LunarPhaseName::NewMoon => "New Moon",
+            LunarPhaseName::WaxingCrescent => "Waxing Crescent",
+            LunarPhaseName::FirstQuarter => "First Quarter",
+            LunarPhaseName::WaxingGibbous => "Waxing Gibbous",
+            LunarPhaseName::FullMoon => "Full Moon",
+            LunarPhaseName::WaningGibbous => "Waning Gibbous",
+            LunarPhaseName::LastQuarter => "Last Quarter",
+            LunarPhaseName::WaningCrescent => "Waning Crescent",
+        };
+        write!(f, "{}", name)
     }
 }
 
