@@ -11,6 +11,8 @@ An MCP (Model Context Protocol) server for astrological calculations using the S
 - **Retrograde Tracking** - Current and upcoming retrograde periods
 - **Lunar Information** - Moon phases and void-of-course periods
 - **Synastry** - Compatibility analysis between two charts
+- **Life Area Analysis** - Transit impacts organized by life areas (work, romance, spirituality, etc.)
+- **Relationship Timing** - Combined synastry and transit analysis for relationship insights
 
 ## Installation
 
@@ -145,6 +147,55 @@ Returns:
 - House placements for context
 - Exact aspects highlighted (< 1° orb)
 - Summary of harmonious vs challenging aspects
+
+#### `get_full_chart_analysis`
+Comprehensive analysis combining natal chart, transits, and life area insights.
+
+```json
+{
+  "name": "John",
+  "date": "2024-12-18"
+}
+```
+
+Returns:
+- Complete natal chart positions
+- Daily transits with aspects to natal planets
+- Lunar phase and moon sign
+- Currently retrograde planets
+- Life area transits organized by area:
+  - **Identity** (1st house) - Self, appearance
+  - **Finances** (2nd house) - Money, values
+  - **Communication** (3rd house) - Learning, siblings
+  - **Home** (4th house) - Family, roots
+  - **Romance** (5th house) - Creativity, pleasure
+  - **Work** (6th house) - Health, daily routines
+  - **Partnerships** (7th house) - Marriage, contracts
+  - **Transformation** (8th house) - Shared resources, intimacy
+  - **Spirituality** (9th house) - Travel, philosophy
+  - **Career** (10th house) - Public image, authority
+  - **Community** (11th house) - Friends, groups
+  - **Subconscious** (12th house) - Hidden matters, endings
+
+Each life area includes house ruler, transiting planets, and aspects to the ruler.
+
+#### `get_relationship_transit_analysis`
+Combined relationship analysis with current transits for both partners.
+
+```json
+{
+  "person1_name": "John",
+  "person2_name": "Jane",
+  "date": "2024-12-18"
+}
+```
+
+Returns:
+- Synastry aspects between both charts
+- Current transits for person 1
+- Current transits for person 2
+- Lunar context (phase, moon sign)
+- Summary of harmonious vs challenging dynamics
 
 ## Data Storage
 
